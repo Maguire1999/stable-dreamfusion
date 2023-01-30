@@ -3,6 +3,8 @@
 # Question: Generate image using SDS
 
 import math
+
+from torch import optim
 from tqdm import tqdm
 import torch
 import torch.nn as nn
@@ -33,9 +35,10 @@ torch.cuda.empty_cache()
 
 seed_everything(42)
 latents = nn.Parameter(torch.randn(1, 4, 64, 64, device=device))
-optimizer = torch.optim.AdamW([latents], lr=1e-1, weight_decay=0)
+optimizer = optim.Adam([latents], lr=0.001, weight_decay=5e-4) # naive adam
+# optimizer = torch.optim.AdamW([latents], lr=1e-1, weight_decay=0)
 num_steps = 1000
-scheduler = get_cosine_schedule_with_warmup(optimizer, 100, int(num_steps*1.5))
+scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda epoch: 1)  # fake scheduler
 
 for step in tqdm(range(num_steps)):
     optimizer.zero_grad()
@@ -61,15 +64,15 @@ for step in tqdm(range(num_steps)):
     optimizer.step()
     scheduler.step()
 
-    with torch.no_grad():
-        # Static threshold
-        latents.data = latents.data.clip(-1, 1)
-        # Dynamic thresholding
-        #s = torch.as_tensor(np.percentile(latents.abs().cpu().numpy(), 90, axis=(1,2,3)), dtype=latents.dtype).to(device)
-        #latents.data = latents.clip(-s, s) / s
+    # with torch.no_grad():
+    #     # Static threshold
+    #     latents.data = latents.data.clip(-1, 1)
+    #     # Dynamic thresholding
+    #     #s = torch.as_tensor(np.percentile(latents.abs().cpu().numpy(), 90, axis=(1,2,3)), dtype=latents.dtype).to(device)
+    #     #latents.data = latents.clip(-s, s) / s
 
     if step > 0 and step % 100 == 0:
         rgb = guidance.decode_latents(latents)
         img = rgb.detach().squeeze(0).permute(1,2,0).cpu().numpy()
         print('[INFO] save image', img.shape, img.min(), img.max())
-        plt.imsave(f'tmp_lat_img_{step}.jpg', img)
+        plt.imsave(f'no_SDS_tmp_lat_img_{step}.jpg', img)
