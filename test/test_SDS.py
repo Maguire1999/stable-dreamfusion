@@ -61,6 +61,13 @@ for step in tqdm(range(num_steps)):
     optimizer.step()
     scheduler.step()
 
+    with torch.no_grad():
+        # Static threshold
+        latents.data = latents.data.clip(-1, 1)
+        # Dynamic thresholding
+        #s = torch.as_tensor(np.percentile(latents.abs().cpu().numpy(), 90, axis=(1,2,3)), dtype=latents.dtype).to(device)
+        #latents.data = latents.clip(-s, s) / s
+
     if step > 0 and step % 100 == 0:
         rgb = guidance.decode_latents(latents)
         img = rgb.detach().squeeze(0).permute(1,2,0).cpu().numpy()
