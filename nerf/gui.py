@@ -14,7 +14,7 @@ class OrbitCamera:
         self.radius = r # camera distance from center
         self.fovy = fovy # in degree
         self.center = np.array([0, 0, 0], dtype=np.float32) # look at this point
-        self.rot = R.from_quat([1, 0, 0, 0]) # init camera matrix: [[1, 0, 0], [0, -1, 0], [0, 0, 1]] (to suit ngp convention)
+        self.rot = R.from_matrix(np.eye(3))
         self.up = np.array([0, 1, 0], dtype=np.float32) # need to be normalized!
 
     # pose
@@ -22,7 +22,7 @@ class OrbitCamera:
     def pose(self):
         # first move camera to radius
         res = np.eye(4, dtype=np.float32)
-        res[2, 3] -= self.radius
+        res[2, 3] = self.radius
         # rotate
         rot = np.eye(4, dtype=np.float32)
         rot[:3, :3] = self.rot.as_matrix()
@@ -49,7 +49,7 @@ class OrbitCamera:
 
     def pan(self, dx, dy, dz=0):
         # pan in camera coordinate system (careful on the sensitivity!)
-        self.center += 0.0005 * self.rot.as_matrix()[:3, :3] @ np.array([dx, dy, dz])
+        self.center += 0.0005 * self.rot.as_matrix()[:3, :3] @ np.array([dx, -dy, dz])
 
 
 class NeRFGUI:
@@ -112,9 +112,11 @@ class NeRFGUI:
 
     def prepare_buffer(self, outputs):
         if self.mode == 'image':
-            return outputs['image']
+            return outputs['image'].astype(np.float32)
         else:
-            return np.expand_dims(outputs['depth'], -1).repeat(3, -1)
+            depth = outputs['depth'].astype(np.float32)
+            depth = (depth - depth.min()) / (depth.max() - depth.min() + 1e-6)
+            return np.expand_dims(depth, -1).repeat(3, -1)
 
     
     def test_step(self):
@@ -251,7 +253,7 @@ class NeRFGUI:
                         dpg.add_text("Marching Cubes: ")
 
                         def callback_mesh(sender, app_data):
-                            self.trainer.save_mesh(resolution=256)
+                            self.trainer.save_mesh()
                             dpg.set_value("_log_mesh", "saved " + f'{self.trainer.name}_{self.trainer.epoch}.ply')
                             self.trainer.epoch += 1 # use epoch to indicate different calls.
 

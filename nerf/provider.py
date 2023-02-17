@@ -34,10 +34,10 @@ def visualize_poses(poses, dirs, size=0.1):
     for pose, dir in zip(poses, dirs):
         # a camera is visualized with 8 line segments.
         pos = pose[:3, 3]
-        a = pos + size * pose[:3, 0] + size * pose[:3, 1] + size * pose[:3, 2]
-        b = pos - size * pose[:3, 0] + size * pose[:3, 1] + size * pose[:3, 2]
-        c = pos - size * pose[:3, 0] - size * pose[:3, 1] + size * pose[:3, 2]
-        d = pos + size * pose[:3, 0] - size * pose[:3, 1] + size * pose[:3, 2]
+        a = pos + size * pose[:3, 0] + size * pose[:3, 1] - size * pose[:3, 2]
+        b = pos - size * pose[:3, 0] + size * pose[:3, 1] - size * pose[:3, 2]
+        c = pos - size * pose[:3, 0] - size * pose[:3, 1] - size * pose[:3, 2]
+        d = pos + size * pose[:3, 0] - size * pose[:3, 1] - size * pose[:3, 2]
 
         segs = np.array([[pos, a], [pos, b], [pos, c], [pos, d], [a, b], [b, c], [c, d], [d, a]])
         segs = trimesh.load_path(segs)
@@ -118,8 +118,8 @@ def rand_poses(size, device, radius_range=[1, 1.5], theta_range=[0, 120], phi_ra
         targets = targets + torch.randn_like(centers) * 0.2
 
     # lookat
-    forward_vector = safe_normalize(targets - centers)
-    up_vector = torch.FloatTensor([0, -1, 0]).to(device).unsqueeze(0).repeat(size, 1)
+    forward_vector = safe_normalize(centers - targets)
+    up_vector = torch.FloatTensor([0, 1, 0]).to(device).unsqueeze(0).repeat(size, 1)
     right_vector = safe_normalize(torch.cross(forward_vector, up_vector, dim=-1))
     
     if jitter:
@@ -158,8 +158,8 @@ def circle_poses(device, radius=1.25, theta=60, phi=0, return_dirs=False, angle_
     ], dim=-1) # [B, 3]
 
     # lookat
-    forward_vector = - safe_normalize(centers)
-    up_vector = torch.FloatTensor([0, -1, 0]).to(device).unsqueeze(0)
+    forward_vector = safe_normalize(centers)
+    up_vector = torch.FloatTensor([0, 1, 0]).to(device).unsqueeze(0)
     right_vector = safe_normalize(torch.cross(forward_vector, up_vector, dim=-1))
     up_vector = safe_normalize(torch.cross(right_vector, forward_vector, dim=-1))
 
@@ -185,8 +185,6 @@ class NeRFDataset:
 
         self.H = H
         self.W = W
-        self.radius_range = opt.radius_range
-        self.fovy_range = opt.fovy_range
         self.size = size
 
         self.training = self.type in ['train', 'all']
@@ -195,7 +193,7 @@ class NeRFDataset:
         self.cy = self.W / 2
 
         # [debug] visualize poses
-        # poses, dirs = rand_poses(100, self.device, radius_range=self.radius_range, return_dirs=self.opt.dir_text, angle_overhead=self.opt.angle_overhead, angle_front=self.opt.angle_front, jitter=self.opt.jitter_pose, uniform_sphere_rate=1)
+        # poses, dirs = rand_poses(100, self.device, radius_range=self.opt.radius_range, return_dirs=self.opt.dir_text, angle_overhead=self.opt.angle_overhead, angle_front=self.opt.angle_front, jitter=self.opt.jitter_pose, uniform_sphere_rate=1)
         # visualize_poses(poses.detach().cpu().numpy(), dirs.detach().cpu().numpy())
 
 
@@ -205,24 +203,22 @@ class NeRFDataset:
 
         if self.training:
             # random pose on the fly
-            poses, dirs = rand_poses(B, self.device, radius_range=self.radius_range, return_dirs=self.opt.dir_text, angle_overhead=self.opt.angle_overhead, angle_front=self.opt.angle_front, jitter=self.opt.jitter_pose, uniform_sphere_rate=self.opt.uniform_sphere_rate)
+            poses, dirs = rand_poses(B, self.device, radius_range=self.opt.radius_range, return_dirs=self.opt.dir_text, angle_overhead=self.opt.angle_overhead, angle_front=self.opt.angle_front, jitter=self.opt.jitter_pose, uniform_sphere_rate=self.opt.uniform_sphere_rate)
 
             # random focal
-            fov = random.random() * (self.fovy_range[1] - self.fovy_range[0]) + self.fovy_range[0]
-            focal = self.H / (2 * np.tan(np.deg2rad(fov) / 2))
-            intrinsics = np.array([focal, focal, self.cx, self.cy])
+            fov = random.random() * (self.opt.fovy_range[1] - self.opt.fovy_range[0]) + self.opt.fovy_range[0]
         else:
             # circle pose
             phi = (index[0] / self.size) * 360
-            poses, dirs = circle_poses(self.device, radius=self.radius_range[1] * 1.2, theta=60, phi=phi, return_dirs=self.opt.dir_text, angle_overhead=self.opt.angle_overhead, angle_front=self.opt.angle_front)
+            poses, dirs = circle_poses(self.device, radius=self.opt.radius_range[1] * 1.2, theta=60, phi=phi, return_dirs=self.opt.dir_text, angle_overhead=self.opt.angle_overhead, angle_front=self.opt.angle_front)
 
             # fixed focal
-            fov = (self.fovy_range[1] + self.fovy_range[0]) / 2
-            focal = self.H / (2 * np.tan(np.deg2rad(fov) / 2))
-            intrinsics = np.array([focal, focal, self.cx, self.cy])
+            fov = (self.opt.fovy_range[1] + self.opt.fovy_range[0]) / 2
 
-
-        # sample a low-resolution but full image for CLIP
+        focal = self.H / (2 * np.tan(np.deg2rad(fov) / 2))
+        intrinsics = np.array([focal, focal, self.cx, self.cy])
+        
+        # sample a low-resolution but full image
         rays = get_rays(poses, intrinsics, self.H, self.W, -1)
 
         data = {
