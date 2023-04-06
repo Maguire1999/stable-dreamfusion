@@ -33,13 +33,13 @@ if __name__ == '__main__':
     parser.add_argument('--min_lr', type=float, default=1e-4, help="minimal learning rate")
     parser.add_argument('--ckpt', type=str, default='latest')
     parser.add_argument('--cuda_ray', action='store_true', help="use CUDA raymarching instead of pytorch")
+    parser.add_argument('--taichi_ray', action='store_true', help="use taichi raymarching")
     parser.add_argument('--max_steps', type=int, default=1024, help="max num steps sampled per ray (only valid when using --cuda_ray)")
     parser.add_argument('--num_steps', type=int, default=64, help="num steps sampled per ray (only valid when not using --cuda_ray)")
     parser.add_argument('--upsample_steps', type=int, default=32, help="num steps up-sampled per ray (only valid when not using --cuda_ray)")
     parser.add_argument('--update_extra_interval', type=int, default=16, help="iter interval to update extra status (only valid when using --cuda_ray)")
     parser.add_argument('--max_ray_batch', type=int, default=4096, help="batch size of rays at inference to avoid OOM (only valid when not using --cuda_ray)")
-    parser.add_argument('--albedo', action='store_true', help="only use albedo shading to train, overrides --albedo_iters")
-    parser.add_argument('--albedo_iters', type=int, default=1000, help="training iters that only use albedo shading")
+    parser.add_argument('--warmup_iters', type=int, default=2000, help="training iters that only use albedo shading")
     parser.add_argument('--jitter_pose', action='store_true', help="add jitters to the randomly sampled camera poses")
     parser.add_argument('--uniform_sphere_rate', type=float, default=0.5, help="likelihood of sampling camera location uniformly on the sphere surface area")
     # model options
@@ -49,15 +49,17 @@ if __name__ == '__main__':
     parser.add_argument('--blob_density', type=float, default=10, help="max (center) density for the density blob")
     parser.add_argument('--blob_radius', type=float, default=0.5, help="control the radius for the density blob")
     # network backbone
-    parser.add_argument('--fp16', action='store_true', help="use amp mixed precision training")
-    parser.add_argument('--backbone', type=str, default='grid', choices=['grid', 'vanilla'], help="nerf backbone")
+    parser.add_argument('--backbone', type=str, default='grid', choices=['grid', 'vanilla', 'grid_taichi'], help="nerf backbone")
     parser.add_argument('--optim', type=str, default='adan', choices=['adan', 'adam'], help="optimizer")
     parser.add_argument('--sd_version', type=str, default='2.1', choices=['1.5', '2.0', '2.1'], help="stable diffusion version")
     parser.add_argument('--hf_key', type=str, default=None, help="hugging face Stable diffusion model key")
-    # rendering resolution in training, decrease this if CUDA OOM.
+    # try this if CUDA OOM
+    parser.add_argument('--fp16', action='store_true', help="use float16 for training")
+    parser.add_argument('--vram_O', action='store_true', help="optimization for low VRAM usage")
+    # rendering resolution in training, increase these for better quality / decrease these if CUDA OOM even if --vram_O enabled.
     parser.add_argument('--w', type=int, default=64, help="render width for NeRF in training")
     parser.add_argument('--h', type=int, default=64, help="render height for NeRF in training")
-    
+
     ### dataset options
     parser.add_argument('--bound', type=float, default=1, help="assume the scene is bounded in box(-bound, bound)")
     parser.add_argument('--dt_gamma', type=float, default=0, help="dt_gamma (>=0) for adaptive ray marching. set to 0 to disable, >0 to accelerate rendering (but usually with worse quality)")
@@ -73,7 +75,7 @@ if __name__ == '__main__':
     parser.add_argument('--lambda_entropy', type=float, default=1e-4, help="loss scale for alpha entropy")
     parser.add_argument('--lambda_opacity', type=float, default=0, help="loss scale for alpha value")
     parser.add_argument('--lambda_orient', type=float, default=1e-2, help="loss scale for orientation")
-    parser.add_argument('--lambda_tv', type=float, default=1e-7, help="loss scale for total variation")
+    parser.add_argument('--lambda_tv', type=float, default=0, help="loss scale for total variation")
 
     ### GUI options
     parser.add_argument('--gui', action='store_true', help="start a GUI")
@@ -93,19 +95,24 @@ if __name__ == '__main__':
         opt.cuda_ray = True
 
     elif opt.O2:
-        # only use fp16 if not evaluating normals (else lead to NaNs in training...)
-        if opt.albedo:
-            opt.fp16 = True
+        opt.fp16 = True
         opt.dir_text = True
         opt.backbone = 'vanilla'
-
-    if opt.albedo:
-        opt.albedo_iters = opt.iters
 
     if opt.backbone == 'vanilla':
         from nerf.network import NeRFNetwork
     elif opt.backbone == 'grid':
         from nerf.network_grid import NeRFNetwork
+    elif opt.backbone == 'grid_taichi':
+        opt.cuda_ray = False
+        opt.taichi_ray = True
+        import taichi as ti
+        from nerf.network_grid_taichi import NeRFNetwork
+        taichi_half2_opt = True
+        taichi_init_args = {"arch": ti.cuda, "device_memory_GB": 4.0}
+        if taichi_half2_opt:
+            taichi_init_args["half2_vectorization"] = True
+        ti.init(**taichi_init_args)
     else:
         raise NotImplementedError(f'--backbone {opt.backbone} is not implemented!')
 
@@ -127,18 +134,18 @@ if __name__ == '__main__':
         if opt.gui:
             gui = NeRFGUI(opt, trainer)
             gui.render()
-        
+
         else:
             test_loader = NeRFDataset(opt, device=device, type='test', H=opt.H, W=opt.W, size=100).dataloader()
             trainer.test(test_loader)
-            
+
             if opt.save_mesh:
-                # a special loader for poisson mesh reconstruction, 
+                # a special loader for poisson mesh reconstruction,
                 # loader = NeRFDataset(opt, device=device, type='test', H=128, W=128, size=100).dataloader()
                 trainer.save_mesh()
-    
+
     else:
-        
+
         train_loader = NeRFDataset(opt, device=device, type='train', H=opt.h, W=opt.w, size=100).dataloader()
 
         if opt.optim == 'adan':
@@ -159,8 +166,8 @@ if __name__ == '__main__':
             # scheduler = lambda optimizer: optim.lr_scheduler.LambdaLR(optimizer, lambda iter: 0.1 ** min(iter / opt.iters, 1))
 
         if opt.guidance == 'stable-diffusion':
-            from nerf.sd import StableDiffusion
-            guidance = StableDiffusion(device, opt.sd_version, opt.hf_key)
+            from sd import StableDiffusion
+            guidance = StableDiffusion(device, opt.fp16, opt.vram_O, opt.sd_version, opt.hf_key)
         elif opt.guidance == 'clip':
             from nerf.clip import CLIP
             guidance = CLIP(device)
@@ -174,7 +181,7 @@ if __name__ == '__main__':
 
             gui = NeRFGUI(opt, trainer)
             gui.render()
-        
+
         else:
             valid_loader = NeRFDataset(opt, device=device, type='val', H=opt.H, W=opt.W, size=5).dataloader()
 
