@@ -89,10 +89,10 @@ class MLP(nn.Module):
 class NeRFNetwork(NeRFRenderer):
     def __init__(self, 
                  opt,
-                 num_layers=4, # 5 in paper
-                 hidden_dim=96, # 128 in paper
+                 num_layers=5, # 5 in paper
+                 hidden_dim=64, # 128 in paper
                  num_layers_bg=2, # 3 in paper
-                 hidden_dim_bg=64, # 64 in paper
+                 hidden_dim_bg=32, # 64 in paper
                  encoding='frequency_torch', # pure pytorch
                  ):
         
@@ -100,11 +100,13 @@ class NeRFNetwork(NeRFRenderer):
 
         self.num_layers = num_layers
         self.hidden_dim = hidden_dim
-        self.encoder, self.in_dim = get_encoder(encoding, input_dim=3, multires=6)
+        self.encoder, self.in_dim = get_encoder(encoding, input_dim=3, multires=12)
         self.sigma_net = MLP(self.in_dim, 4, hidden_dim, num_layers, bias=True, block=ResBlock)
 
+        self.density_activation = trunc_exp if self.opt.density_activation == 'exp' else F.softplus
+
         # background network
-        if self.bg_radius > 0:
+        if self.opt.bg_radius > 0:
             self.num_layers_bg = num_layers_bg   
             self.hidden_dim_bg = hidden_dim_bg
             self.encoder_bg, self.in_dim_bg = get_encoder(encoding, input_dim=3, multires=4)
@@ -113,24 +115,15 @@ class NeRFNetwork(NeRFRenderer):
         else:
             self.bg_net = None
 
-    def density_blob(self, x):
-        # x: [B, N, 3]
-        
-        d = (x ** 2).sum(-1)
-        # g = self.opt.blob_density * torch.exp(- d / (self.opt.blob_radius ** 2))
-        g = self.opt.blob_density * (1 - torch.sqrt(d) / self.opt.blob_radius)
-
-        return g
-
     def common_forward(self, x):
         # x: [N, 3], in [-bound, bound]
 
         # sigma
-        enc = self.encoder(x, bound=self.bound)
+        enc = self.encoder(x, bound=self.bound, max_level=self.max_level)
 
         h = self.sigma_net(enc)
 
-        sigma = F.softplus(h[..., 0] + self.density_blob(x))
+        sigma = self.density_activation(h[..., 0] + self.density_blob(x))
         albedo = torch.sigmoid(h[..., 1:])
 
         return sigma, albedo
@@ -156,14 +149,15 @@ class NeRFNetwork(NeRFRenderer):
     def normal(self, x):
     
         with torch.enable_grad():
-            x.requires_grad_(True)
-            sigma, albedo = self.common_forward(x)
-            # query gradient
-            normal = - torch.autograd.grad(torch.sum(sigma), x, create_graph=True)[0] # [N, 3]
+            with torch.cuda.amp.autocast(enabled=False):
+                x.requires_grad_(True)
+                sigma, albedo = self.common_forward(x)
+                # query gradient
+                normal = - torch.autograd.grad(torch.sum(sigma), x, create_graph=True)[0] # [N, 3]
         
         # normal = self.finite_difference_normal(x)
         normal = safe_normalize(normal)
-        # normal = torch.nan_to_num(normal)
+        normal = torch.nan_to_num(normal)
 
         return normal
         
@@ -185,16 +179,16 @@ class NeRFNetwork(NeRFRenderer):
             # normal = self.normal(x)
         
             with torch.enable_grad():
-                x.requires_grad_(True)
-                sigma, albedo = self.common_forward(x)
-                # query gradient
-                normal = - torch.autograd.grad(torch.sum(sigma), x, create_graph=True)[0] # [N, 3]
+                with torch.cuda.amp.autocast(enabled=False):
+                    x.requires_grad_(True)
+                    sigma, albedo = self.common_forward(x)
+                    # query gradient
+                    normal = - torch.autograd.grad(torch.sum(sigma), x, create_graph=True)[0] # [N, 3]
             normal = safe_normalize(normal)
-            # normal = torch.nan_to_num(normal)
-            # normal = normal.detach()
+            normal = torch.nan_to_num(normal)
 
             # lambertian shading
-            lambertian = ratio + (1 - ratio) * (normal @ l).clamp(min=0) # [N,]
+            lambertian = ratio + (1 - ratio) * (normal * l).sum(-1).clamp(min=0) # [N,]
 
             if shading == 'textureless':
                 color = lambertian.unsqueeze(-1).repeat(1, 3)
@@ -236,8 +230,12 @@ class NeRFNetwork(NeRFRenderer):
             {'params': self.sigma_net.parameters(), 'lr': lr},
         ]        
 
-        if self.bg_radius > 0:
+        if self.opt.bg_radius > 0:
             # params.append({'params': self.encoder_bg.parameters(), 'lr': lr * 10})
             params.append({'params': self.bg_net.parameters(), 'lr': lr})
+        
+        if self.opt.dmtet and not self.opt.lock_geo:
+            params.append({'params': self.sdf, 'lr': lr})
+            params.append({'params': self.deform, 'lr': lr})
 
         return params
